@@ -71,7 +71,7 @@ public class LibArchiveReader : SafeHandleZeroOrMinusOneIsInvalid
 
     private void Throw()
     {
-        throw new ApplicationException($"{Marshal.PtrToStringUTF8(archive_error_string(handle))}");
+        throw new ApplicationException(Marshal.PtrToStringUTF8(archive_error_string(handle)));
     }
 
     protected override bool ReleaseHandle()
@@ -82,11 +82,13 @@ public class LibArchiveReader : SafeHandleZeroOrMinusOneIsInvalid
     public IEnumerable<Entry> Entries()
     {
         int r;
-        while ((r=archive_read_next_header(handle, out var entry))==0)
+        while ((r=archive_read_next_header(handle, out var entryHandle))==0)
         {
-            var name = Marshal.PtrToStringUTF8(archive_entry_pathname(entry));
-            if (name is not null)
-                yield return new Entry(name, handle);
+            var entry = Entry.Create(entryHandle, handle);
+            if (entry is not null)
+            {
+                yield return entry;
+            }
         }
 
         if (r != (int)ARCHIVE_RESULT.ARCHIVE_EOF)
@@ -95,23 +97,50 @@ public class LibArchiveReader : SafeHandleZeroOrMinusOneIsInvalid
 
     public class Entry
     {
-        public string Name { get; }
-        private readonly IntPtr handle;
-        public FileStream Stream => new FileStream(handle);
+        protected readonly IntPtr entry;
+        protected readonly IntPtr archive;
 
-        internal Entry(string name, IntPtr handle)
+        public string Name { get; }
+        public EntryType Type;
+        public FileStream Stream => new(archive);
+
+        public bool IsDirectory => Type == EntryType.Directory;
+        public bool IsRegularFile => Type == EntryType.RegularFile;
+
+        protected Entry(IntPtr entry, IntPtr archive)
         {
-            this.Name = name;
-            this.handle = handle;
+            this.entry = entry;
+            this.archive = archive;
+            Name = Marshal.PtrToStringUTF8(archive_entry_pathname(entry)) ?? throw new ApplicationException("Unable to retrieve entry's pathname");
+            Type = (EntryType)archive_entry_filetype(entry);
         }
+
+        internal static Entry? Create(IntPtr entry, IntPtr archive)
+        {
+            try
+            {
+                return new Entry(entry, archive);
+            }
+            catch (ApplicationException)
+            {
+                return null;
+            }
+        }
+    }
+
+    public enum EntryType
+    {
+        Directory = 0x4000,  // AE_IFDIR
+        RegularFile = 0x8000 // AE_IFREG
     }
 
     public class FileStream : Stream
     {
-        private readonly IntPtr _archive;
+        private readonly IntPtr archive;
+
         internal FileStream(IntPtr archive)
         {
-            this._archive = archive;
+            this.archive = archive;
         }
         
         public override void Flush()
@@ -120,7 +149,7 @@ public class LibArchiveReader : SafeHandleZeroOrMinusOneIsInvalid
 
         public override int Read(byte[] buffer, int offset, int count)
         {
-            return archive_read_data(_archive, ref MemoryMarshal.GetReference(buffer.AsSpan()[offset..]), count);
+            return archive_read_data(archive, ref MemoryMarshal.GetReference(buffer.AsSpan()[offset..]), count);
         }
 
         public override long Seek(long offset, SeekOrigin origin)
@@ -172,6 +201,9 @@ public class LibArchiveReader : SafeHandleZeroOrMinusOneIsInvalid
 
     [DllImport("archive")]
     private static extern IntPtr archive_entry_pathname(IntPtr entry);
+
+    [DllImport("archive")]
+    private static extern int archive_entry_filetype(IntPtr entry);
 
     [DllImport("archive")]
     private static extern int archive_read_free(IntPtr a);
